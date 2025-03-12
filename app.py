@@ -1,9 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy 
-from geoalchemy2 import Geometry
 from flask_cors import CORS
-from shapely.geometry import Point
-from geoalchemy2.shape import from_shape
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 
@@ -28,8 +25,10 @@ db = SQLAlchemy(app)
 
 class Assessment(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
-    start_coor = db.Column(Geometry('POINT'), nullable=False)
-    end_coor = db.Column(Geometry('POINT'), nullable=False)
+    start_lat = db.Column(db.Numeric(9,7), nullable=False)   # FIX: Use Numeric(9,7)
+    start_lng = db.Column(db.Numeric(10,7), nullable=False)  # FIX: Use Numeric(10,7)
+    end_lat = db.Column(db.Numeric(9,7), nullable=False)     # FIX: Use Numeric(9,7)
+    end_lng = db.Column(db.Numeric(10,7), nullable=False)    # FIX: Use Numeric(10,7)
     date = db.Column(db.DateTime, nullable=False)
     cracks = db.relationship('Crack', backref='assessment_group', lazy=True)
 
@@ -72,26 +71,24 @@ def update_logs():
 
         # Extract required fields
         segment_id = data.get("segment_id")
-        start_coor = data.get("start_coor")
-        end_coor = data.get("end_coor")
+        start_lat = data.get("start_coor")[0]
+        start_lng = data.get("start_coor")[1]
+        end_lat = data.get("end_coor")[0]
+        end_lng = data.get("end_coor")[1]
         date_created = data.get("date_created")
         cracks = data.get("cracks")
 
-        if isinstance(start_coor, list) and isinstance(end_coor, list):
-            start_coor = from_shape(Point(start_coor[1], start_coor[0]))  # (lng, lat)
-            end_coor = from_shape(Point(end_coor[1], end_coor[0]))  # (lng, lat)
-        else:
-            return jsonify({"response": "Invalid coordinate format"}), 400
-
         # Validate required fields
-        if not all([segment_id, start_coor, end_coor, date_created, cracks]):
+        if not all([segment_id, start_lat, start_lng, end_lat, end_lng, date_created, cracks]):
             return jsonify({"response": "Missing required fields"}), 400
 
         # Save to the database
         new_assessment = Assessment(
             ID=segment_id,
-            start_coor=start_coor,
-            end_coor=end_coor,
+            start_lat=start_lat,
+            start_lng=start_lng,
+            end_lat=end_lat,
+            end_lng=end_lng,
             date=datetime.strptime(date_created, "%Y%m%d_%H-%M-%S")
         )
         db.session.add(new_assessment)
