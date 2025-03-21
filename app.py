@@ -20,6 +20,10 @@ dbname = 'u854837124_roadtrackdb'
 
 app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{username}:{password}@{hostname}/{dbname}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+    'pool_recycle': 30
+}
 
 db = SQLAlchemy(app)
 
@@ -42,7 +46,15 @@ class Crack(db.Model):
     assessment_ID = db.Column(db.Integer(), db.ForeignKey('assessment.ID'))
 
     def __repr__(self):
-        return f'Crack {self.ID} under Assessment {self.assessment}'
+        return f'Crack {self.ID} under Assessment {self.assessment_ID}'
+
+    def to_dict(self):
+        return {
+            'id': self.ID,
+            'crack_type': self.crack_type,
+            'crack_severity': self.crack_severity,
+            'assessment_id': self.assessment_ID
+        }
 
 class Admin(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
@@ -111,6 +123,14 @@ def update_logs():
 
     except Exception as e:
         return jsonify({"response": f"Something went wrong: {str(e)}"}), 500
+
+@app.route('/ping', methods=['GET'])
+def ping():
+
+    cracks = Crack.query.all()
+    result = [crack.to_dict() for crack in cracks]
+    return jsonify(result), 200
+
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port="5000")
