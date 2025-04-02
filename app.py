@@ -7,6 +7,8 @@ import requests
 import time
 import threading
 from threading import Event
+from werkzeug.utils import secure_filename
+import os
 
 app = Flask(__name__)
 
@@ -23,6 +25,15 @@ dbname = 'roadtrackdb'
 # username = 'u854837124_roadtrack'
 # password = 'RoadTrack123!'
 # dbname = 'u854837124_roadtrackdb'
+# hostname = 'localhost'
+# username = 'jhoriz'
+# password = ''
+# dbname = 'arcdem_db'
+
+
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg'}
+app.config['UPLOAD_FOLDER'] = 'uploads' # Set the path to the 'uploads' directory
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)  # Create the 'uploads' folder if it doesn't exist
 
 app.config['SQLALCHEMY_DATABASE_URI'] = f'mysql+pymysql://{username}:{password}@{hostname}/{dbname}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -177,7 +188,9 @@ class Crack(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
     crack_type = db.Column(db.String(15), nullable=False)
     crack_severity = db.Column(db.String(10), nullable=False)
-    assessment_ID = db.Column(db.Integer(), db.ForeignKey('assessment.ID'))
+    crack_length = db.Column(db.Integer)
+    crack_width = db.Column(db.Integer)
+    assessment_ID = db.Column(db.Integer, db.ForeignKey('assessment.ID'))
 
     def __repr__(self):
         return f'Crack {self.ID} under Assessment {self.assessment_ID}'
@@ -187,6 +200,8 @@ class Crack(db.Model):
             'id': self.ID,
             'crack_type': self.crack_type,
             'crack_severity': self.crack_severity,
+            'crack_length': self.crack_length,
+            'crack_width': self.crack_width,
             'assessment_id': self.assessment_ID
         }
 
@@ -198,6 +213,9 @@ class Admin(db.Model):
     def __repr__(self):
         return f'Admin {self.email}'
 
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def request_geocode(lat, lon):
     url = "https://nominatim.openstreetmap.org/reverse"
@@ -329,10 +347,16 @@ def update_logs():
             db.session.flush()  # Get `ID` before committing
 
             for crack in cracks:
+                # Check if width is not None or null before adding it
+                # Check if width is not None and not 0 before adding it
+                crack_width = crack["width"] if crack["width"] not in [None, 0] else None
+        
                 new_crack = Crack(
                     assessment_ID=new_assessment.ID,
                     crack_type=crack["type"],
-                    crack_severity=crack["severity"]  # Fix: Corrected spelling
+                    crack_severity=crack["severity"],
+                    crack_length=crack["length"],
+                    crack_width=crack_width,  # Only add width if it's not null
                 )
                 db.session.add(new_crack)
 
@@ -358,19 +382,6 @@ def ping():
     cracks = Crack.query.all()
     result = [crack.to_dict() for crack in cracks]
     return jsonify(result), 200
-
-# @app.route('/retry_geocoding')
-# def retry_failed_geocoding():
-#     failed_assessments = Assessment.query.filter_by(needs_geocoding=True).all()
-#     retried = 0
-#     for assessment in failed_assessments:
-#         try:
-#             reverse_geocode(assessment)
-#             retried += 1
-#         except Exception as e:
-#             print(f"Still failed for {assessment} | {e}")
-#     db.session.commit()
-#     return f"Retry complete. Successfully updated {retried}/{len(failed_assessments)} assessments."
 
 @app.route('/group/<string:level>')
 def get_groups(level):
@@ -462,6 +473,16 @@ def get_assessment(ID):
 
     return jsonify(assessment.cracks_to_dict())
 
+@app.route('/cracks', methods=['GET'])
+def get_cracks():
+    cracks = Crack.query.all()
+
+    if not cracks:
+            return jsonify({"error": f"No cracks found."}), 404
+
+    # Return the data as a JSON response
+    return jsonify([crack.to_dict() for crack in cracks])
+
 
 
 # @app.route('/group', methods=['GET'])
@@ -473,6 +494,27 @@ def get_assessment(ID):
 #     query = [province.to_dict() for province in provinces]
     
 #     return jsonify(query), 200
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    if file and allowed_file(file.filename):
+        filename = file.filename
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Save the file in the uploads directory
+        file.save(file_path)
+        
+        return jsonify({'message': f'File successfully uploaded: {filename}'}), 200
+    else:
+        return jsonify({'error': 'Invalid file type. Only JPG and JPEG files are allowed.'}), 400
 
 
 if __name__ == "__main__":
