@@ -17,18 +17,18 @@ CORS(app)
 geocode_event = Event()
 
 # MySQL Database Configuration
-hostname = 'localhost'
-username = 'root'
-password = ''
-dbname = 'roadtrackdb'
+# hostname = 'localhost'
+# username = 'root'
+# password = ''
+# dbname = 'roadtrackdb'
 # hostname = 'srv1668.hstgr.io'
 # username = 'u854837124_roadtrack'
 # password = 'RoadTrack123!'
 # dbname = 'u854837124_roadtrackdb'
-# hostname = 'localhost'
-# username = 'jhoriz'
-# password = 'jrfa2202!sql'
-# dbname = 'arcdem_db'
+hostname = 'localhost'
+username = 'jhoriz'
+password = 'jrfa2202!sql'
+dbname = 'arcdem_db'
 
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg'}
@@ -188,8 +188,8 @@ class Crack(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
     crack_type = db.Column(db.String(15), nullable=False)
     crack_severity = db.Column(db.String(10), nullable=False)
-    # crack_length = db.Column(db.Integer)
-    # crack_width = db.Column(db.Integer)
+    crack_length = db.Column(db.Integer, nullable=False)
+    crack_width = db.Column(db.Integer)
     assessment_ID = db.Column(db.Integer, db.ForeignKey('assessment.ID'))
 
     def __repr__(self):
@@ -200,8 +200,8 @@ class Crack(db.Model):
             'id': self.ID,
             'crack_type': self.crack_type,
             'crack_severity': self.crack_severity,
-            # 'crack_length': self.crack_length,
-            # 'crack_width': self.crack_width,
+            'crack_length': self.crack_length,
+            'crack_width': self.crack_width,
             'assessment_id': self.assessment_ID
         }
 
