@@ -17,18 +17,18 @@ CORS(app)
 geocode_event = Event()
 
 # MySQL Database Configuration
-# hostname = 'localhost'
-# username = 'root'
-# password = ''
-# dbname = 'roadtrackdb'
+hostname = 'localhost'
+username = 'root'
+password = ''
+dbname = 'roadtrackdb'
 # hostname = 'srv1668.hstgr.io'
 # username = 'u854837124_roadtrack'
 # password = 'RoadTrack123!'
 # dbname = 'u854837124_roadtrackdb'
-hostname = 'localhost'
-username = 'jhoriz'
-password = ''
-dbname = 'arcdem_db'
+# hostname = 'localhost'
+# username = 'jhoriz'
+# password = 'jrfa2202!sql'
+# dbname = 'arcdem_db'
 
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg'}
@@ -188,8 +188,8 @@ class Crack(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
     crack_type = db.Column(db.String(15), nullable=False)
     crack_severity = db.Column(db.String(10), nullable=False)
-    crack_length = db.Column(db.Integer)
-    crack_width = db.Column(db.Integer)
+    # crack_length = db.Column(db.Integer)
+    # crack_width = db.Column(db.Integer)
     assessment_ID = db.Column(db.Integer, db.ForeignKey('assessment.ID'))
 
     def __repr__(self):
@@ -200,8 +200,8 @@ class Crack(db.Model):
             'id': self.ID,
             'crack_type': self.crack_type,
             'crack_severity': self.crack_severity,
-            'crack_length': self.crack_length,
-            'crack_width': self.crack_width,
+            # 'crack_length': self.crack_length,
+            # 'crack_width': self.crack_width,
             'assessment_id': self.assessment_ID
         }
 
@@ -469,7 +469,7 @@ def get_assessment(ID):
     assessment = db.session.get(Assessment, ID)
 
     if not assessment:
-        return jsonify({"error": f"Group with ID {ID} not found."}), 404
+        return jsonify({"error": f"Assessment with ID {ID} not found."}), 404
 
     return jsonify(assessment.cracks_to_dict())
 
@@ -496,26 +496,73 @@ def get_cracks():
 #     return jsonify(query), 200
 
 @app.route('/upload', methods=['POST'])
-def upload_file():
+def upload_files():
     if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-    
-    file = request.files['file']
+        return jsonify({"error": "No files found in request"}), 400
 
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
+    # We expect a single file at a time (so we use getlist to capture all "file" keys if there are any)
+    files = request.files.getlist('file')  # Get the list of files under the "file" key
+    uploaded_files = []
+
+    for file in files:
+        if file and allowed_file(file.filename):
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+            file.save(file_path)
+            uploaded_files.append(file.filename)
+
+    if not uploaded_files:
+        return jsonify({"error": "No valid files uploaded. Only JPG or JPEG are allowed."}), 400
+
+    return jsonify({"message": "Files uploaded successfully!", "uploaded_files": uploaded_files}), 200
+
+@app.route('/delete/<string:filename>', methods=['DELETE'])
+def delete_file(filename):
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     
-    if file and allowed_file(file.filename):
-        filename = file.filename
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
-        # Save the file in the uploads directory
-        file.save(file_path)
-        
-        return jsonify({'message': f'File successfully uploaded: {filename}'}), 200
+    if os.path.exists(file_path):
+        os.remove(file_path)  # Delete the file
+        return jsonify({"message": f"File {filename} deleted successfully!"}), 200
     else:
-        return jsonify({'error': 'Invalid file type. Only JPG and JPEG files are allowed.'}), 400
+        return jsonify({"error": "File not found"}), 404
 
+@app.route('/delete', methods=['DELETE'])
+def delete_files():
+    filenames = request.get_json().get('filenames', [])
+    
+    if not filenames:
+        return jsonify({"error": "No filenames provided for deletion"}), 400
+
+    deleted_files = []
+    not_found_files = []
+
+    for filename in filenames:
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            deleted_files.append(filename)
+        else:
+            not_found_files.append(filename)
+    
+    return jsonify({
+        "message": "Files deletion completed",
+        "deleted_files": deleted_files,
+        "not_found_files": not_found_files
+    }), 200
+
+@app.route('/assessment/<int:ID>', methods=['DELETE'])
+def delete_assessment(ID):
+    # Retrieve the assessment from the database
+    assessment = db.session.get(Assessment, ID)
+
+    # Check if the assessment exists
+    if not assessment:
+        return jsonify({"error": f"Assessment with ID {ID} not found."}), 404
+    
+    # Delete the assessment
+    db.session.delete(assessment)
+    db.session.commit()
+
+    return jsonify({"message": f"Assessment with ID {ID} has been deleted."}), 200
 
 if __name__ == "__main__":
     threading.Thread(target=geocoding_worker, daemon=True).start()
