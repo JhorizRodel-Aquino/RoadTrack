@@ -349,7 +349,7 @@ def update_logs():
             for crack in cracks:
                 # Check if width is not None or null before adding it
                 # Check if width is not None and not 0 before adding it
-                crack_width = crack["width"] if crack["width"] not in [None, 0] else None
+                crack_width = crack.get("width") if crack.get("width") not in [None, 0] else None
         
                 new_crack = Crack(
                     assessment_ID=new_assessment.ID,
@@ -557,12 +557,37 @@ def delete_assessment(ID):
     # Check if the assessment exists
     if not assessment:
         return jsonify({"error": f"Assessment with ID {ID} not found."}), 404
-    
+
+    # Get the associated group before deleting the assessment
+    group = assessment.group
+
     # Delete the assessment
     db.session.delete(assessment)
     db.session.commit()
 
+    # Check and delete empty ancestor groups
+    check_and_delete_empty_ancestors(group)
+
     return jsonify({"message": f"Assessment with ID {ID} has been deleted."}), 200
+
+
+def check_and_delete_empty_ancestors(group):
+    """
+    Recursively checks and deletes empty ancestor groups.
+    A group is deleted if it has no remaining assessments and no child groups.
+    """
+    while group:
+        # Check if the group has any remaining assessments or child groups
+        has_assessments = db.session.query(Assessment).filter_by(group_ID=group.ID).first() is not None
+        has_children = db.session.query(Group).filter_by(parent_ID=group.ID).first() is not None
+
+        if not has_assessments and not has_children:
+            parent = group.parent  # Save reference to parent before deleting
+            db.session.delete(group)
+            db.session.commit()
+            group = parent  # Move to the parent group for further checking
+        else:
+            break  # Stop recursion if the group is not empty
 
 if __name__ == "__main__":
     threading.Thread(target=geocoding_worker, daemon=True).start()
