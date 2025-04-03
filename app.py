@@ -190,6 +190,7 @@ class Crack(db.Model):
     crack_severity = db.Column(db.String(10), nullable=False)
     crack_length = db.Column(db.Integer, nullable=False)
     crack_width = db.Column(db.Integer)
+    index = db.Column(db.Integer, nullable=False)
     assessment_ID = db.Column(db.Integer, db.ForeignKey('assessment.ID'))
 
     def __repr__(self):
@@ -202,6 +203,7 @@ class Crack(db.Model):
             'crack_severity': self.crack_severity,
             'crack_length': self.crack_length,
             'crack_width': self.crack_width,
+            'index': self.index,
             'assessment_id': self.assessment_ID
         }
 
