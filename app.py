@@ -17,18 +17,18 @@ CORS(app)
 geocode_event = Event()
 
 # MySQL Database Configuration
-# hostname = 'localhost'
-# username = 'root'
-# password = ''
-# dbname = 'roadtrackdb'
+hostname = 'localhost'
+username = 'root'
+password = ''
+dbname = 'roadtrackdb'
 # hostname = 'srv1668.hstgr.io'
 # username = 'u854837124_roadtrack'
 # password = 'RoadTrack123!'
 # dbname = 'u854837124_roadtrackdb'
-hostname = 'localhost'
-username = 'jhoriz'
-password = 'jrfa2202!sql'
-dbname = 'arcdem_db'
+# hostname = 'localhost'
+# username = 'jhoriz'
+# password = 'jrfa2202!sql'
+# dbname = 'arcdem_db'
 
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg'}
@@ -72,6 +72,7 @@ class Group(db.Model):
 
     def info_to_dict(self):
         return {
+            'name': self.name,
             'n_assess': len(self.get_all_assessments()),
             'n_cracks': self.total_cracks(),
             'date': self.latest_assessment_date()
@@ -101,6 +102,7 @@ class Group(db.Model):
     def ancestors_to_dict(self):
         parents = []
         curr_grp = self
+        parents.append({'name': curr_grp.name, 'id': curr_grp.ID})
 
         while curr_grp and curr_grp.parent_ID is not None:
             curr_grp = db.session.get(Group, curr_grp.parent_ID)
@@ -142,6 +144,7 @@ class Group(db.Model):
 
 class Assessment(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(100), nullable=False)
     start_lat = db.Column(db.Numeric(9,7), nullable=False)   # FIX: Use Numeric(9,7)
     start_lon = db.Column(db.Numeric(10,7), nullable=False)  # FIX: Use Numeric(10,7)
     end_lat = db.Column(db.Numeric(9,7), nullable=False)     # FIX: Use Numeric(9,7)
@@ -158,11 +161,13 @@ class Assessment(db.Model):
         return {
             'id': self.ID,
             'start_coor': (float(self.start_lat), float(self.start_lon)),
-            'end_coor': (float(self.end_lat), float(self.end_lon))
+            'end_coor': (float(self.end_lat), float(self.end_lon)),
+            'filename': self.filename
         }
     
     def cracks_to_dict(self):
         return {
+            'filename': self.filename,
             'date': self.date,
             'cracks': [crack.to_dict() for crack in self.cracks]
         }
@@ -183,6 +188,9 @@ class Assessment(db.Model):
                 counts['multi'] += 1
 
         return counts
+
+    def address_to_dict(self):
+        return self.group.ancestors_to_dict()
 
 class Crack(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
@@ -324,7 +332,7 @@ def update_logs():
 
         for assessment in assessments:
             # Extract required fields
-            segment_id = assessment.get("segment_id")
+            filename = assessment.get("filename")
             start_lat = assessment.get("start_coor")[0]
             start_lon = assessment.get("start_coor")[1]
             end_lat = assessment.get("end_coor")[0]
@@ -333,12 +341,12 @@ def update_logs():
             cracks = assessment.get("cracks")
 
             # Validate required fields
-            if not all([segment_id, start_lat, start_lon, end_lat, end_lon, date_created, cracks]):
+            if not all([filename, start_lat, start_lon, end_lat, end_lon, date_created, cracks]):
                 return jsonify({"response": "Missing required fields"}), 400
 
             # Save to the database
             new_assessment = Assessment(
-                ID=segment_id,
+                filename=filename,
                 start_lat=start_lat,
                 start_lon=start_lon,
                 end_lat=end_lat,
@@ -359,6 +367,7 @@ def update_logs():
                     crack_severity=crack["severity"],
                     crack_length=crack["length"],
                     crack_width=crack_width,  # Only add width if it's not null
+                    index=crack['index']
                 )
                 db.session.add(new_crack)
 
@@ -426,7 +435,7 @@ def get_group_children(ID):
     group = db.session.get(Group, ID)
     
     if not group:
-        return jsonify({"error": f"Group with ID {ID} not found."}), 404
+        return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
     return jsonify(group.children_to_dict()), 200
 
@@ -435,7 +444,7 @@ def get_group_descendants(ID):
     group = db.session.get(Group, ID)
     
     if not group:
-        return jsonify({"error": f"Group with ID {ID} not found."}), 404
+        return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
     return jsonify(group.descendants_to_dict()), 200
 
@@ -444,7 +453,7 @@ def get_group_ancestors(ID):
     group = db.session.get(Group, ID)
     
     if not group:
-        return jsonify({"error": f"Group with ID {ID} not found."}), 404
+        return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
     return jsonify(group.ancestors_to_dict()), 200
 
@@ -453,7 +462,7 @@ def get_group_summary(ID):
     group = db.session.get(Group, ID)
 
     if not group:
-        return jsonify({"error": f"Group with ID {ID} not found."}), 404
+        return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
     return jsonify(group.summary_to_dict()), 200
 
@@ -462,7 +471,7 @@ def get_group_assessments(ID):
     group = db.session.get(Group, ID)
     
     if not group:
-        return jsonify({"error": f"Group with ID {ID} not found."}), 404
+        return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
     return jsonify(group.assessments_to_dict()), 200
 
@@ -471,9 +480,18 @@ def get_assessment(ID):
     assessment = db.session.get(Assessment, ID)
 
     if not assessment:
-        return jsonify({"error": f"Assessment with ID {ID} not found."}), 404
+        return jsonify({"error": f"Assessment with ID {ID} is not found."}), 404
 
     return jsonify(assessment.cracks_to_dict())
+
+@app.route('/assessment/<int:ID>/address', methods=['GET'])
+def get_assessment_address(ID):
+    assessment = db.session.get(Assessment, ID)
+
+    if not assessment:
+        return jsonify({"error": f"Assessment with ID {ID} is not found."}), 404
+
+    return jsonify(assessment.address_to_dict())
 
 @app.route('/cracks', methods=['GET'])
 def get_cracks():
