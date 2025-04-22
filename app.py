@@ -1,5 +1,5 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy 
+from flask import Flask, request, jsonify, send_from_directory
+from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
@@ -17,10 +17,10 @@ CORS(app)
 geocode_event = Event()
 
 # MySQL Database Configuration
-hostname = 'localhost'
-username = 'root'
-password = ''
-dbname = 'roadtrackdb'
+# hostname = 'localhost'
+# username = 'root'
+# password = ''
+# dbname = 'roadtrackdb'
 # hostname = 'srv1668.hstgr.io'
 # username = 'u854837124_roadtrack'
 # password = 'RoadTrack123!'
@@ -29,6 +29,10 @@ dbname = 'roadtrackdb'
 # username = 'jhoriz'
 # password = 'jrfa2202!sql'
 # dbname = 'arcdem_db'
+hostname = '157.230.248.185'
+username = 'jhoriz'
+password = 'jrfa2202!sql'
+dbname = 'arcdem_db'
 
 
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg'}
@@ -62,7 +66,7 @@ class Group(db.Model):
             all_assessments.extend(child.get_all_assessments())
 
         return all_assessments
-    
+
     def to_dict(self):
         return {
             'id': self.ID,
@@ -75,7 +79,8 @@ class Group(db.Model):
             'name': self.name,
             'n_assess': len(self.get_all_assessments()),
             'n_cracks': self.total_cracks(),
-            'date': self.latest_assessment_date()
+            'date': self.latest_assessment_date(),
+            'parent_id': self.parent_ID
         }
 
     def assessments_to_dict(self):
@@ -87,7 +92,7 @@ class Group(db.Model):
     def summary_to_dict(self):
         assessments = [{**assessment.to_dict(), **assessment.cracks_to_dict()} \
             for assessment in self.get_all_assessments()]
-        
+
         address = ", ".join(ancestor['name'] for ancestor in self.ancestors_to_dict())
 
         return {
@@ -121,6 +126,17 @@ class Group(db.Model):
 
         return build_hierarchy(self)
 
+    def alldescendants_to_dict(self):
+        def build_hierarchy(group):
+            return {
+                'id': group.ID,
+                'name': group.name,
+                'children': [build_hierarchy(child) for child in group.children],
+                **({'assessments': [a.to_dict() for a in group.assessments]} if group.assessments else {})
+            }
+
+        return build_hierarchy(self)
+
     def total_cracks(self):
         total = {
             'longi': 0,
@@ -130,17 +146,17 @@ class Group(db.Model):
 
         for assessment in self.get_all_assessments():
             cracks_count = assessment.count_cracks()
-                
+
             total['longi'] += cracks_count['longi']
             total['trans'] += cracks_count['trans']
             total['multi'] += cracks_count['multi']
-            
+
         return total
 
     def latest_assessment_date(self):
         if not self.get_all_assessments():
             return ""
-        return str(max(assessment.date for assessment in self.get_all_assessments() if assessment.date)) 
+        return str(max(assessment.date for assessment in self.get_all_assessments() if assessment.date))
 
 class Assessment(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
@@ -161,10 +177,10 @@ class Assessment(db.Model):
         return {
             'id': self.ID,
             'start_coor': (float(self.start_lat), float(self.start_lon)),
-            'end_coor': (float(self.end_lat), float(self.end_lon)),
-            'filename': self.filename
+            'end_coor': (float(self.end_lat), float(self.end_lon))
+            # 'filename': self.filename
         }
-    
+
     def cracks_to_dict(self):
         return {
             'filename': self.filename,
@@ -196,8 +212,8 @@ class Crack(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
     crack_type = db.Column(db.String(15), nullable=False)
     crack_severity = db.Column(db.String(10), nullable=False)
-    crack_length = db.Column(db.Integer, nullable=False)
-    crack_width = db.Column(db.Integer)
+    crack_length = db.Column(db.Numeric(4,3), nullable=False)
+    crack_width = db.Column(db.Numeric(4,3))
     index = db.Column(db.Integer, nullable=False)
     assessment_ID = db.Column(db.Integer, db.ForeignKey('assessment.ID'))
 
@@ -249,7 +265,7 @@ def request_geocode(lat, lon):
     result = {
         "city": address.get("city") or address.get("town") or address.get("municipality") or "no city",
         "province": address.get("state") or "no province",
-        "region": address.get("region") or "no region", 
+        "region": address.get("region") or "no region",
     }
 
     return result
@@ -307,7 +323,7 @@ def geocoding_worker():
                     print(f"Geocoded assessment {assessment.ID}")
                 except Exception as e:
                     print(f"Geocoding failed for {assessment.ID}: {e}")
-            
+
             db.session.commit()
             print("Batch commit done.")
             time.sleep(5)  # small delay before next check
@@ -360,7 +376,7 @@ def update_logs():
                 # Check if width is not None or null before adding it
                 # Check if width is not None and not 0 before adding it
                 crack_width = crack.get("width") if crack.get("width") not in [None, 0] else None
-        
+
                 new_crack = Crack(
                     assessment_ID=new_assessment.ID,
                     crack_type=crack["type"],
@@ -413,7 +429,7 @@ def get_groups(level):
 
         groups = []
         for province in provinces:
-            groups.extend(province.children)    
+            groups.extend(province.children)
     else:
         return jsonify({"error": "Invalid parameter level"}), 400
 
@@ -424,7 +440,7 @@ def get_groups(level):
 def get_group(ID):
 
     group = db.session.get(Group, ID)
-    
+
     if not group:
         return jsonify({"error": f"Group with the id {ID} is not found"}), 404
 
@@ -433,7 +449,7 @@ def get_group(ID):
 @app.route('/group/<int:ID>/children', methods=['GET'])
 def get_group_children(ID):
     group = db.session.get(Group, ID)
-    
+
     if not group:
         return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
@@ -442,16 +458,27 @@ def get_group_children(ID):
 @app.route('/group/<int:ID>/descendants', methods=['GET'])
 def get_group_descendants(ID):
     group = db.session.get(Group, ID)
-    
+
     if not group:
         return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
     return jsonify(group.descendants_to_dict()), 200
 
+
+@app.route('/group/descendants', methods=['GET'])
+def get_groups_descendants():
+    groups = Group.query.filter_by(parent_ID=None).all()
+
+    if not groups:
+        return jsonify({"error": "No top-level groups found."}), 404
+
+    return jsonify([group.alldescendants_to_dict() for group in groups]), 200
+
+
 @app.route('/group/<int:ID>/ancestors', methods=['GET'])
 def get_group_ancestors(ID):
     group = db.session.get(Group, ID)
-    
+
     if not group:
         return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
@@ -469,7 +496,7 @@ def get_group_summary(ID):
 @app.route('/group/<int:ID>/assessments', methods=['GET'])
 def get_group_assessments(ID):
     group = db.session.get(Group, ID)
-    
+
     if not group:
         return jsonify({"error": f"Group with ID {ID} is not found."}), 404
 
@@ -512,7 +539,7 @@ def get_cracks():
 
 #     provinces = Group.query.filter_by(parent_ID=None).all()
 #     query = [province.to_dict() for province in provinces]
-    
+
 #     return jsonify(query), 200
 
 @app.route('/upload', methods=['POST'])
@@ -538,7 +565,7 @@ def upload_files():
 @app.route('/delete/<string:filename>', methods=['DELETE'])
 def delete_file(filename):
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    
+
     if os.path.exists(file_path):
         os.remove(file_path)  # Delete the file
         return jsonify({"message": f"File {filename} deleted successfully!"}), 200
@@ -548,7 +575,7 @@ def delete_file(filename):
 @app.route('/delete', methods=['DELETE'])
 def delete_files():
     filenames = request.get_json().get('filenames', [])
-    
+
     if not filenames:
         return jsonify({"error": "No filenames provided for deletion"}), 400
 
@@ -562,7 +589,7 @@ def delete_files():
             deleted_files.append(filename)
         else:
             not_found_files.append(filename)
-    
+
     return jsonify({
         "message": "Files deletion completed",
         "deleted_files": deleted_files,
@@ -609,8 +636,114 @@ def check_and_delete_empty_ancestors(group):
         else:
             break  # Stop recursion if the group is not empty
 
+
+@app.route('/assessments', methods=['GET'])
+def get_assessments():
+    assessments = Assessment.query.all()
+
+    if not assessments:
+            return jsonify({"error": f"No assessments found."}), 404
+
+    # Return the data as a JSON response
+    return jsonify([assessment.to_dict() for assessment in assessments])
+
+@app.route('/image/<path:filename>', methods=['GET'])
+def get_image(filename):
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+
+    if not os.path.isfile(file_path):
+        return "File not found", 404
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename), 200
+
+
+@app.route('/delete_selected', methods=['DELETE'])
+def delete_selected():
+    # Get the data from the request body
+    data = request.get_json()
+    group_ids = data.get('groups', [])
+    assessment_ids = data.get('assessments', [])
+
+    # Delete assessments
+    for ass_id in assessment_ids:
+        assessment = db.session.get(Assessment, ass_id)
+        if assessment:
+            # Get the associated group before deleting the assessment
+            group = assessment.group
+            db.session.delete(assessment)
+            db.session.commit()
+            # Check and delete empty ancestor groups
+            check_and_delete_empty_ancestors(group)
+
+    # Delete groups (only if they are empty)
+    for group_id in group_ids:
+        group = db.session.get(Group, group_id)
+        if group:
+            # Check if group has any remaining assessments
+            if not group.assessments:  # Assuming 'assessments' is the relationship
+                db.session.delete(group)
+                db.session.commit()
+
+    return jsonify({"message": "Selected assessments and groups have been deleted."}), 200
+
+@app.route('/average_crack_length/leaf_groups', methods=['GET'])
+def average_crack_length_leaf_groups():
+    all_groups = Group.query.all()
+    leaf_groups = [group for group in all_groups if not group.children]
+
+    result = {}
+
+    for group in leaf_groups:
+        assessments = group.assessments
+
+        if not assessments:
+            avg_crack_length = 0.0
+        else:
+            total_crack_length = sum(
+                float(crack.crack_length)
+                for assessment in assessments
+                for crack in assessment.cracks
+            )
+            avg_crack_length = total_crack_length / len(assessments)
+
+        result[group.ID] = {
+            'group_name': group.name,
+            'average_crack_length': round(avg_crack_length, 3)
+        }
+
+    return jsonify(result)
+
+@app.route('/priority_scores')
+def priority_scores():
+    groups = Group.query.all()
+    data = []
+
+    for group in groups:
+        if not group.children:  # innermost groups only
+            total_crack_score = 0
+            total_assessments = len(group.get_all_assessments())
+
+            for assessment in group.get_all_assessments():
+                for crack in assessment.cracks:
+                    if crack.crack_severity.lower() == 'wide':
+                        total_crack_score += float(crack.crack_length) * 0.7
+                    elif crack.crack_severity.lower() == 'narrow':
+                        total_crack_score += float(crack.crack_length) * 0.3
+
+            if total_assessments > 0:
+                total_assessment_length = total_assessments * 5  # 5m each
+                score_per_meter = total_crack_score / total_assessment_length
+            else:
+                score_per_meter = 0
+
+            data.append({
+                'group_id': group.ID,
+                'group_name': group.name,
+                'weighted_crack_score_per_meter': round(score_per_meter, 2)
+            })
+
+    return jsonify(data)
+
+
 if __name__ == "__main__":
     threading.Thread(target=geocoding_worker, daemon=True).start()
     app.run(debug=True, host="0.0.0.0", port="5000")
-    
-
