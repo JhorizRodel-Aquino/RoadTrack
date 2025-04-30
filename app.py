@@ -10,13 +10,18 @@ from threading import Event
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
+import re
+
+
+import hashlib
+from flask_bcrypt import Bcrypt
 import jwt
 from functools import wraps
 
 app = Flask(__name__)
 
 # JWT Configuration
-app.config['SECRET_KEY'] = '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92'  # Secure random key
+app.config['SECRET_KEY'] = '68e8bcea7bb8b8d1c48987cc'  # Secure random key
 
 CORS(app)
 
@@ -35,9 +40,13 @@ geocode_event = Event()
 # username = 'jhoriz'
 # password = 'jrfa2202!sql'
 # dbname = 'arcdem_db'
-hostname = '157.230.248.185'
-username = 'jhoriz'
-password = 'jrfa2202!sql'
+# hostname = '157.230.248.185'
+# username = 'jhoriz'
+# password = 'jrfa2202!sql'
+# dbname = 'arcdem_db'
+hostname = 'localhost'
+username = 'root'
+password = ''
 dbname = 'arcdem_db'
 
 
@@ -53,6 +62,8 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 }
 
 db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+
 
 class Group(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
@@ -64,14 +75,23 @@ class Group(db.Model):
 
     def get_all_assessments(self):
         """
-        Recursively fetch all assessments for this group and its child groups.
+        Recursively fetch all assessments for this group and its child groups,
+        sorted by the datetime embedded in the filename.
         """
-        all_assessments = list(self.assessments)  # Start with assessments in this group
 
+        def extract_datetime_from_filename(filename):
+            match = re.match(r"(\d{8})_(\d{6})", filename)
+            if match:
+                return datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+            return datetime.min
+
+        # Fetch and combine
+        assessments = list(self.assessments)
         for child in self.children:
-            all_assessments.extend(child.get_all_assessments())
+            assessments += child.get_all_assessments()
 
-        return all_assessments
+        # Sort before returning
+        return sorted(assessments, key=lambda a: extract_datetime_from_filename(a.filename), reverse=True)
 
     def to_dict(self):
         return {
@@ -133,12 +153,22 @@ class Group(db.Model):
         return build_hierarchy(self)
 
     def alldescendants_to_dict(self):
+        def extract_datetime_from_filename(filename):
+            match = re.match(r"(\d{8})_(\d{6})", filename)
+            if match:
+                return datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+            return datetime.min
         def build_hierarchy(group):
+            sorted_assessments = sorted(
+                group.assessments,
+                key=lambda a: extract_datetime_from_filename(a.filename),
+                reverse=True 
+            )
             return {
                 'id': group.ID,
                 'name': group.name,
                 'children': [build_hierarchy(child) for child in group.children],
-                **({'assessments': [a.to_dict() for a in group.assessments]} if group.assessments else {})
+                **({'assessments': [a.to_dict() for a in sorted_assessments]} if group.assessments else {})
             }
 
         return build_hierarchy(self)
@@ -184,7 +214,6 @@ class Assessment(db.Model):
             'id': self.ID,
             'start_coor': (float(self.start_lat), float(self.start_lon)),
             'end_coor': (float(self.end_lat), float(self.end_lon))
-            # 'filename': self.filename
         }
 
     def cracks_to_dict(self):
@@ -239,12 +268,41 @@ class Crack(db.Model):
 
 class Admin(db.Model):
     ID = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(30), nullable=False, unique=True)
     email = db.Column(db.String(50), nullable=False, unique=True)
     password_hash = db.Column(db.String(60), nullable=False)
+    created = db.Column(db.DateTime, default=datetime.utcnow)  # Track account creation date
+    status = db.Column(db.String(20), default='Pending')  # Track the status of the admin account (active, suspended, etc.)
+    
+    @property
+    def password(self):
+        return self.password
 
-    def __repr__(self):
-        return f'Admin {self.email}'
+    @password.setter
+    def password(self, plain_text_password):
+        self.password_hash = bcrypt.generate_password_hash(plain_text_password).decode('utf-8')
+        
+    @property
+    def gravatar_url(self):
+        return self.get_gravatar_url(self.email)  # Generate Gravatar URL based on email
 
+    def get_gravatar_url(self, email, size=200):
+        # Normalize the email by stripping leading/trailing spaces and converting to lowercase
+        normalized_email = email.strip().lower()
+        
+        # Create an MD5 hash of the email
+        email_hash = hashlib.md5(normalized_email.encode('utf-8')).hexdigest()
+        
+        # Construct the Gravatar URL
+        url = f"https://www.gravatar.com/avatar/{email_hash}?s={size}&d=identicon"  # `d=identicon` will give a default image if no Gravatar is set
+        
+        return url
+        
+    def check_password_correction(self, attempted_password):
+        return bcrypt.check_password_hash(self.password_hash, attempted_password)
+
+    def to_dict(self):
+        return {'id': self.ID, "username": self.username, "email": self.email, 'status': self.status, 'filename': self.gravatar_url}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -334,12 +392,231 @@ def geocoding_worker():
             print("Batch commit done.")
             time.sleep(5)  # small delay before next check
 
+def create_initial_admin():
+    # Check if any admin already exists
+    if Admin.query.first() is None:
+        default_admin = Admin(
+            username="admin",
+            email="arcdem.moderator@gmail.com",
+            status="Super Admin",
+            password = "arcdem2025!"
+        )
+
+        db.session.add(default_admin)
+        db.session.commit()
+
+        print("Initial Super Admin created successfully!")
+    else:
+        print("Admin already exists, skipping initial creation.")
+
+def extract_datetime_from_filename(filename):
+    try:
+        # Example filename: 20250417_170535-14_196527-120_881195-14_196555-120_881187
+        match = re.match(r"(\d{8})_(\d{6})", filename)
+        if match:
+            date_str = match.group(1) + match.group(2)  # "20250417" + "170535"
+            return datetime.datetime.strptime(date_str, "%Y%m%d%H%M%S")
+    except Exception as e:
+        pass
+    return datetime.min  # Use minimum datetime if parsing fails
+
 
 # Create database tables
 with app.app_context():
     db.create_all()
+    create_initial_admin()
 
 
+@app.route('/signup', methods=['POST'])
+def signup():
+    if request.content_type != 'application/json':
+        return jsonify({"response": "Invalid Content-Type. Expected application/json"}), 400
+
+    try:
+        admin = request.get_json()
+
+        username = admin.get("username")
+        email=admin.get('email')
+        password=admin.get('password')
+
+        if not all([username, email, password]):
+                return jsonify({"response": "Missing required fields"}), 400
+
+        new_admin = Admin(username=username, email=email, password=password)
+        
+        db.session.add(new_admin)
+        db.session.commit()
+
+        return jsonify({"response": "Signed up successfully!"}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"response": f"Database error: {str(e)}"}), 500
+
+    except Exception as e:
+        return jsonify({"response": f"Something went wrong: {str(e)}"}), 500
+
+@app.route('/login', methods=['POST'])
+def login():
+    if request.content_type != 'application/json':
+        return jsonify({"response": "Invalid Content-Type. Expected application/json"}), 400
+
+    try:
+        admin = request.get_json()
+
+        email_or_username = admin.get("emailOrUsername")
+        password = admin.get('password')
+
+        if not all([email_or_username, password]):
+            return jsonify({"response": "Missing required fields"}), 400
+
+        if "@" in email_or_username:
+            email = email_or_username
+            attempted_admin = Admin.query.filter_by(email=email).first()
+        else:
+            username = email_or_username
+            attempted_admin = Admin.query.filter_by(username=username).first()
+
+        if attempted_admin is None or not attempted_admin.check_password_correction(attempted_password=password):
+            return jsonify({"response": "Incorrect username, email or password."}), 401
+
+        if attempted_admin.status == "Pending":
+            return jsonify({"response": "This account is still awaiting approval from the administrator. Please check your email regularly for updates."}), 403
+        
+        if attempted_admin.status == "Rejected":
+            return jsonify({"response": "This account is rejected by the administrator."}), 403
+
+        # Generate JWT token
+        # expiration = datetime.utcnow() + timedelta(minutes=5)
+        expiration = datetime.utcnow() + timedelta(hours=1)
+        token = jwt.encode({"admin_id": attempted_admin.ID, "exp": expiration}, app.config['SECRET_KEY'], algorithm="HS256")
+
+        return jsonify({
+            "response": "Logged in successfully!",
+            "token": token
+        }), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"response": f"Database error: {str(e)}"}), 500
+
+    except Exception as e:
+        return jsonify({"response": f"Something went wrong: {str(e)}"}), 500
+
+@app.route('/authenticate', methods=['GET'])
+def authenticate():
+    token = request.headers.get('Authorization')  # Get token from Authorization header
+
+    if not token:
+        return jsonify({"response": "Token missing. Please provide a valid token in the Authorization header."}), 401
+
+    # Ensure the token starts with "Bearer " (if you're following common token formats)
+    if token.startswith('Bearer '):
+        token = token[7:]  # Remove "Bearer " prefix from token
+    else:
+        return jsonify({"response": "Invalid token format. Token should start with 'Bearer '."}), 400
+
+    # Call the validate function to decode and validate the token
+    validation_result = validate_token(token)
+    if validation_result["status_code"] != 200:
+        return jsonify(validation_result), validation_result["status_code"]
+
+    return jsonify({"response": "Welcome to the admin page!"}), 200
+
+def validate_token(token):
+    try:
+        # Decoding the token to check its validity
+        decoded_token = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+        return {"status_code": 200, "decoded_token": decoded_token}
+    except jwt.ExpiredSignatureError:
+        return {"response": "Invalid or expired token", "status_code": 401}
+    except jwt.InvalidTokenError:
+        return {"response": "Invalid or expired token", "status_code": 401}
+    except Exception as e:
+        return {"response": f"Error: {str(e)}", "status_code": 400}
+
+def token_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        token = request.headers.get('Authorization')
+
+        current_admin = None
+        if token:
+            try:
+                # Extract token from the "Bearer <token>" format
+                token = token.split(" ")[1]  # Assuming the token is in the format "Bearer <token>"
+
+                # Call validate_jwt_token to check if the token is valid
+                validation_result = validate_token(token)
+                if validation_result["status_code"] != 200:
+                    return jsonify(validation_result), validation_result["status_code"]
+
+                current_admin = db.session.get(Admin, validation_result["decoded_token"]['admin_id'])
+                if not current_admin:
+                    return jsonify({"response": "Admin not found"}), 404
+
+            except Exception as e:
+                return jsonify({"response": f"Error: {str(e)}"}), 401
+
+        return f(current_admin, *args, **kwargs)
+
+    return decorated_function
+
+
+@app.route('/profile', methods=['GET'])
+@token_required
+def get_admin_profile(current_admin):
+    return jsonify({
+        'id': current_admin.ID,
+        'username': current_admin.username,
+        'email': current_admin.email,
+        'filename': current_admin.gravatar_url
+    }), 200
+
+@app.route('/admins', methods=['GET'])
+@token_required
+def get_admins(current_admin):
+    admins = Admin.query.all()
+
+    if not admins:
+        return jsonify({"error": "No admins found."}), 404
+
+    return jsonify([admin.to_dict() for admin in admins]), 200
+    
+@app.route('/admin/<int:ID>', methods=['PATCH'])
+@token_required
+def update_admin_status(current_admin, ID):
+    admin = db.session.get(Admin, ID)
+
+    if not admin:
+        return jsonify({"error": f"Admin with ID {ID} is not found."}), 404
+
+    try:
+        new_status = request.get_json()
+        admin.status = new_status['statusUpdate']
+        
+        db.session.commit()
+
+        return jsonify({"response": f"Admin with ID {ID} is updated successfully."}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to update admin. Error: {str(e)}"}), 500
+
+@app.route('/admin/<int:ID>', methods=['DELETE'])
+@token_required
+def delete_admin(current_admin, ID):
+    admin = db.session.get(Admin, ID)
+
+    if not admin:
+        return jsonify({"error": f"Admin with ID {ID} is not found."}), 404
+
+    db.session.delete(admin)
+    db.session.commit()
+
+    return jsonify({"response": f"Admin with ID {ID} is removed successfully."}), 200
+    
+ 
 @app.route('/')
 def home():
     return "Hello World! RoadTrack Backend is Up!"
@@ -404,6 +681,26 @@ def update_logs():
     except Exception as e:
         return jsonify({"response": f"Something went wrong: {str(e)}"}), 500
 
+@app.route('/upload', methods=['POST'])
+def upload_files():
+    if 'file' not in request.files:
+        return jsonify({"error": "No files found in request"}), 400
+
+    # We expect a single file at a time (so we use getlist to capture all "file" keys if there are any)
+    files = request.files.getlist('file')  # Get the list of files under the "file" key
+    uploaded_files = []
+
+    for file in files:
+        if file and allowed_file(file.filename):
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+            file.save(file_path)
+            uploaded_files.append(file.filename)
+
+    if not uploaded_files:
+        return jsonify({"error": "No valid files uploaded. Only JPG or JPEG are allowed."}), 400
+
+    return jsonify({"message": "Files uploaded successfully!", "uploaded_files": uploaded_files}), 200
+
 @app.route('/view_logs', methods=['GET'])
 def view_logs():
     assessments = Assessment.query.all()
@@ -443,7 +740,8 @@ def get_groups(level):
     return jsonify(query), 200
 
 @app.route('/group/<int:ID>', methods=['GET'])
-def get_group(ID):
+@token_required
+def get_group(current_admin, ID):
 
     group = db.session.get(Group, ID)
 
@@ -470,16 +768,15 @@ def get_group_descendants(ID):
 
     return jsonify(group.descendants_to_dict()), 200
 
-
 @app.route('/group/descendants', methods=['GET'])
-def get_groups_descendants():
+@token_required
+def get_groups_descendants(current_admin):
     groups = Group.query.filter_by(parent_ID=None).all()
 
     if not groups:
         return jsonify({"error": "No top-level groups found."}), 404
 
     return jsonify([group.alldescendants_to_dict() for group in groups]), 200
-
 
 @app.route('/group/<int:ID>/ancestors', methods=['GET'])
 def get_group_ancestors(ID):
@@ -500,7 +797,8 @@ def get_group_summary(ID):
     return jsonify(group.summary_to_dict()), 200
 
 @app.route('/group/<int:ID>/assessments', methods=['GET'])
-def get_group_assessments(ID):
+@token_required
+def get_group_assessments(current_admin, ID):
     group = db.session.get(Group, ID)
 
     if not group:
@@ -508,8 +806,26 @@ def get_group_assessments(ID):
 
     return jsonify(group.assessments_to_dict()), 200
 
+@app.route('/assessments', methods=['GET'])
+@token_required
+def get_assessments(current_admin):
+    assessments = Assessment.query.all()
+
+    if not assessments:
+            return jsonify({"error": f"No assessments found."}), 404
+
+        # Sort by extracted datetime from filename
+    sorted_assessments = sorted(
+        assessments,
+        key=lambda a: extract_datetime_from_filename(a.filename),
+        reverse=True  # change to True for newest first
+    )
+
+    return jsonify([assessment.to_dict() for assessment in sorted_assessments])
+
 @app.route('/assessment/<int:ID>/cracks', methods=['GET'])
-def get_assessment(ID):
+@token_required
+def get_assessment_cracks(current_admin, ID):
     assessment = db.session.get(Assessment, ID)
 
     if not assessment:
@@ -526,6 +842,14 @@ def get_assessment_address(ID):
 
     return jsonify(assessment.address_to_dict())
 
+@app.route('/image/<path:filename>', methods=['GET'])
+def get_image(filename):
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+
+    if not os.path.isfile(file_path):
+        return "File not found", 404
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename), 200
+
 @app.route('/cracks', methods=['GET'])
 def get_cracks():
     cracks = Crack.query.all()
@@ -536,74 +860,205 @@ def get_cracks():
     # Return the data as a JSON response
     return jsonify([crack.to_dict() for crack in cracks])
 
+def get_all_subgroups(group):
+    """Recursively get all subgroups of a group"""
+    subgroups = []
+    for child in group.children:
+        subgroups.append(child)
+        subgroups.extend(get_all_subgroups(child))
+    return subgroups
+
+def get_all_assessments_in_group(group):
+    """Get all assessments in a group and its subgroups"""
+    assessments = list(group.assessments)  # Start with assessments in this group
+    
+    # Add assessments from all subgroups
+    for child in group.children:
+        assessments.extend(get_all_assessments_in_group(child))
+    
+    return assessments
+
+def check_and_delete_empty_ancestors(group):
+    """
+    Recursively checks and deletes empty ancestor groups.
+    A group is deleted if it has no remaining assessments and no child groups.
+    """
+    while group:
+        # Check if the group has any remaining assessments or child groups
+        has_assessments = db.session.query(Assessment).filter_by(group_ID=group.ID).first() is not None
+        has_children = db.session.query(Group).filter_by(parent_ID=group.ID).first() is not None
+
+        if not has_assessments and not has_children:
+            parent = group.parent  # Save reference to parent before deleting
+            db.session.delete(group)
+            db.session.commit()
+            group = parent  # Move to the parent group for further checking
+        else:
+            break  # Stop recursion if the group is not empty
 
 
-# @app.route('/group', methods=['GET'])
-# def provinces():
-#     if request.content_type != 'application/json':
-#         return jsonify({"response": "Invalid Content-Type. Expected application/json"}), 400
+@app.route('/average_crack_length/leaf_groups', methods=['GET'])
+def average_crack_length_leaf_groups():
+    all_groups = Group.query.all()
+    leaf_groups = [group for group in all_groups if not group.children]
 
-#     provinces = Group.query.filter_by(parent_ID=None).all()
-#     query = [province.to_dict() for province in provinces]
+    result = {}
 
-#     return jsonify(query), 200
+    for group in leaf_groups:
+        assessments = group.assessments
 
-@app.route('/upload', methods=['POST'])
-def upload_files():
-    if 'file' not in request.files:
-        return jsonify({"error": "No files found in request"}), 400
+        if not assessments:
+            avg_crack_length = 0.0
+        else:
+            total_crack_length = sum(
+                float(crack.crack_length)
+                for assessment in assessments
+                for crack in assessment.cracks
+            )
+            avg_crack_length = total_crack_length / len(assessments)
 
-    # We expect a single file at a time (so we use getlist to capture all "file" keys if there are any)
-    files = request.files.getlist('file')  # Get the list of files under the "file" key
-    uploaded_files = []
+        result[group.ID] = {
+            'group_name': group.name,
+            'average_crack_length': round(avg_crack_length, 3)
+        }
 
-    for file in files:
-        if file and allowed_file(file.filename):
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-            file.save(file_path)
-            uploaded_files.append(file.filename)
+    return jsonify(result)
 
-    if not uploaded_files:
-        return jsonify({"error": "No valid files uploaded. Only JPG or JPEG are allowed."}), 400
+@app.route('/priority_scores')
+def priority_scores():
+    groups = Group.query.all()
+    data = []
 
-    return jsonify({"message": "Files uploaded successfully!", "uploaded_files": uploaded_files}), 200
+    for group in groups:
+        if not group.children:  # innermost groups only
+            total_crack_score = 0
+            total_assessments = len(group.get_all_assessments())
 
-@app.route('/delete/<string:filename>', methods=['DELETE'])
-def delete_file(filename):
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            for assessment in group.get_all_assessments():
+                for crack in assessment.cracks:
+                    if crack.crack_severity.lower() == 'wide':
+                        total_crack_score += float(crack.crack_length) * 0.7
+                    elif crack.crack_severity.lower() == 'narrow':
+                        total_crack_score += float(crack.crack_length) * 0.3
 
-    if os.path.exists(file_path):
-        os.remove(file_path)  # Delete the file
-        return jsonify({"message": f"File {filename} deleted successfully!"}), 200
+            if total_assessments > 0:
+                total_assessment_length = total_assessments * 5  # 5m each
+                score_per_meter = total_crack_score / total_assessment_length
+            else:
+                score_per_meter = 0
+
+            data.append({
+                'group_id': group.ID,
+                'group_name': group.name,
+                'weighted_crack_score_per_meter': round(score_per_meter, 2)
+            })
+
+    return jsonify(data)
+
+@app.route('/group', methods=['POST'])
+@token_required
+def create_group(current_admin):
+    data = request.get_json()
+
+    name = data.get('name')
+    group_ids = data.get('groups', [])
+    assessment_ids = data.get('assessments', [])
+
+    if not name:
+        return jsonify({'error': 'Group name is required'}), 400
+
+    if not group_ids and not assessment_ids:
+        return jsonify({'error': 'No groups or assessments provided'}), 400
+
+    groups = [db.session.get(Group, gid) for gid in group_ids]
+    assessments = [db.session.get(Assessment, aid) for aid in assessment_ids]
+
+    if any(g is None for g in groups):
+        return jsonify({'error': 'One or more groups not found'}), 404
+    if any(a is None for a in assessments):
+        return jsonify({'error': 'One or more assessments not found'}), 404
+
+    # Check if group with same name already exists
+    existing_group = Group.query.filter_by(name=name).first()
+
+    if existing_group:
+        target_group = existing_group
     else:
-        return jsonify({"error": "File not found"}), 404
+        # Determine parent ID based on context
+        parent_id = None
+        if group_ids:
+            parent_ids = set(g.parent_ID for g in groups)
+            parent_id = parent_ids.pop() if len(parent_ids) == 1 else None
+        elif assessment_ids:
+            parent_ids = set(a.group_ID for a in assessments)
+            if len(parent_ids) > 1:
+                return jsonify({'error': 'All assessments must belong to the same group'}), 400
+            parent_id = parent_ids.pop()
 
-# @app.route('/delete', methods=['DELETE'])
-# def delete_files():
-#     filenames = request.get_json().get('filenames', [])
+        # Create new group under determined parent
+        target_group = Group(name=name, parent_ID=parent_id)
+        db.session.add(target_group)
+        db.session.flush()  # Get ID before using
 
-#     if not filenames:
-#         return jsonify({"error": "No filenames provided for deletion"}), 400
+    # Reassign children
+    for g in groups:
+        g.parent_ID = target_group.ID
 
-#     deleted_files = []
-#     not_found_files = []
+    for a in assessments:
+        a.group_ID = target_group.ID
 
-#     for filename in filenames:
-#         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-#         if os.path.exists(file_path):
-#             os.remove(file_path)
-#             deleted_files.append(filename)
-#         else:
-#             not_found_files.append(filename)
+    db.session.commit()
 
-#     return jsonify({
-#         "message": "Files deletion completed",
-#         "deleted_files": deleted_files,
-#         "not_found_files": not_found_files
-#     }), 200
+    return jsonify({
+        'message': f"Items grouped under {'existing' if existing_group else 'new'} group.",
+        'group_id': target_group.ID,
+        'parent_id': target_group.parent_ID
+    })
+
+@app.route('/ungroup', methods=['POST'])
+@token_required
+def ungroup(current_admin):
+    data = request.get_json()
+    group_id = data.get('group_id')
+
+    if not group_id:
+        return jsonify({'error': 'Group ID is required'}), 400
+
+    group = db.session.get(Group, group_id)
+    if not group:
+        return jsonify({'error': 'Group not found'}), 404
+
+    parent_id = group.parent_ID  # can be None (top-level)
+    reassigned_groups = []
+    reassigned_assessments = []
+
+    # Reassign all child groups to the parent group
+    for child in group.children:
+        child.parent_ID = parent_id
+        reassigned_groups.append(child.ID)
+
+    # Reassign all assessments of this group to the parent group
+    assessments = Assessment.query.filter_by(group_ID=group.ID).all()
+    for ass in assessments:
+        ass.group_ID = parent_id
+        reassigned_assessments.append(ass.ID)
+
+    db.session.commit()  # Commit the reassignment changes before deleting
+
+    # Delete the group itself
+    db.session.delete(group)
+    db.session.commit()
+
+    return jsonify({
+        'message': f"Group {group.name} successfully ungrouped.",
+        'moved_to_parent': parent_id,
+        'reassigned_groups': reassigned_groups,
+        'reassigned_assessments': reassigned_assessments
+    })
 
 @app.route('/delete', methods=['DELETE'])
-def delete_items():
+@token_required
+def delete_items(current_admin):
     data = request.get_json()
     group_ids = data.get('groups', [])
     assessment_ids = data.get('assessments', [])
@@ -678,349 +1133,6 @@ def delete_items():
         "deleted_groups": deleted_groups
     }), 200
 
-def get_all_subgroups(group):
-    """Recursively get all subgroups of a group"""
-    subgroups = []
-    for child in group.children:
-        subgroups.append(child)
-        subgroups.extend(get_all_subgroups(child))
-    return subgroups
-
-def get_all_assessments_in_group(group):
-    """Get all assessments in a group and its subgroups"""
-    assessments = list(group.assessments)  # Start with assessments in this group
-    
-    # Add assessments from all subgroups
-    for child in group.children:
-        assessments.extend(get_all_assessments_in_group(child))
-    
-    return assessments
-
-@app.route('/assessment/<int:ID>', methods=['DELETE'])
-def delete_assessment(ID):
-    # Retrieve the assessment from the database
-    assessment = db.session.get(Assessment, ID)
-
-    # Check if the assessment exists
-    if not assessment:
-        return jsonify({"error": f"Assessment with ID {ID} not found."}), 404
-
-    # Get the associated group before deleting the assessment
-    group = assessment.group
-
-    # Delete the assessment
-    db.session.delete(assessment)
-    db.session.commit()
-
-    # Check and delete empty ancestor groups
-    check_and_delete_empty_ancestors(group)
-
-    return jsonify({"message": f"Assessment with ID {ID} has been deleted."}), 200
-
-
-def check_and_delete_empty_ancestors(group):
-    """
-    Recursively checks and deletes empty ancestor groups.
-    A group is deleted if it has no remaining assessments and no child groups.
-    """
-    while group:
-        # Check if the group has any remaining assessments or child groups
-        has_assessments = db.session.query(Assessment).filter_by(group_ID=group.ID).first() is not None
-        has_children = db.session.query(Group).filter_by(parent_ID=group.ID).first() is not None
-
-        if not has_assessments and not has_children:
-            parent = group.parent  # Save reference to parent before deleting
-            db.session.delete(group)
-            db.session.commit()
-            group = parent  # Move to the parent group for further checking
-        else:
-            break  # Stop recursion if the group is not empty
-
-
-@app.route('/assessments', methods=['GET'])
-def get_assessments():
-    assessments = Assessment.query.all()
-
-    if not assessments:
-            return jsonify({"error": f"No assessments found."}), 404
-
-    # Return the data as a JSON response
-    return jsonify([assessment.to_dict() for assessment in assessments])
-
-@app.route('/image/<path:filename>', methods=['GET'])
-def get_image(filename):
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
-    if not os.path.isfile(file_path):
-        return "File not found", 404
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename), 200
-
-
-# @app.route('/delete_selected', methods=['DELETE'])
-# def delete_selected():
-#     # Get the data from the request body
-#     data = request.get_json()
-#     group_ids = data.get('groups', [])
-#     assessment_ids = data.get('assessments', [])
-
-#     # Delete assessments
-#     for ass_id in assessment_ids:
-#         assessment = db.session.get(Assessment, ass_id)
-#         if assessment:
-#             # Get the associated group before deleting the assessment
-#             group = assessment.group
-#             db.session.delete(assessment)
-#             db.session.commit()
-#             # Check and delete empty ancestor groups
-#             check_and_delete_empty_ancestors(group)
-
-#     # Delete groups (only if they are empty)
-#     for group_id in group_ids:
-#         group = db.session.get(Group, group_id)
-#         if group:
-#             # Check if group has any remaining assessments
-#             if not group.assessments:  # Assuming 'assessments' is the relationship
-#                 db.session.delete(group)
-#                 db.session.commit()
-
-#     return jsonify({"message": "Selected assessments and groups have been deleted."}), 200
-
-@app.route('/average_crack_length/leaf_groups', methods=['GET'])
-def average_crack_length_leaf_groups():
-    all_groups = Group.query.all()
-    leaf_groups = [group for group in all_groups if not group.children]
-
-    result = {}
-
-    for group in leaf_groups:
-        assessments = group.assessments
-
-        if not assessments:
-            avg_crack_length = 0.0
-        else:
-            total_crack_length = sum(
-                float(crack.crack_length)
-                for assessment in assessments
-                for crack in assessment.cracks
-            )
-            avg_crack_length = total_crack_length / len(assessments)
-
-        result[group.ID] = {
-            'group_name': group.name,
-            'average_crack_length': round(avg_crack_length, 3)
-        }
-
-    return jsonify(result)
-
-@app.route('/priority_scores')
-def priority_scores():
-    groups = Group.query.all()
-    data = []
-
-    for group in groups:
-        if not group.children:  # innermost groups only
-            total_crack_score = 0
-            total_assessments = len(group.get_all_assessments())
-
-            for assessment in group.get_all_assessments():
-                for crack in assessment.cracks:
-                    if crack.crack_severity.lower() == 'wide':
-                        total_crack_score += float(crack.crack_length) * 0.7
-                    elif crack.crack_severity.lower() == 'narrow':
-                        total_crack_score += float(crack.crack_length) * 0.3
-
-            if total_assessments > 0:
-                total_assessment_length = total_assessments * 5  # 5m each
-                score_per_meter = total_crack_score / total_assessment_length
-            else:
-                score_per_meter = 0
-
-            data.append({
-                'group_id': group.ID,
-                'group_name': group.name,
-                'weighted_crack_score_per_meter': round(score_per_meter, 2)
-            })
-
-    return jsonify(data)
-
-@app.route('/group', methods=['POST'])
-def create_group():
-    data = request.get_json()
-
-    name = data.get('name')
-    group_ids = data.get('groups', [])
-    assessment_ids = data.get('assessments', [])
-
-    if not name:
-        return jsonify({'error': 'Group name is required'}), 400
-
-    if not group_ids and not assessment_ids:
-        return jsonify({'error': 'No groups or assessments provided'}), 400
-
-    groups = [db.session.get(Group, gid) for gid in group_ids]
-    assessments = [db.session.get(Assessment, aid) for aid in assessment_ids]
-
-    if any(g is None for g in groups):
-        return jsonify({'error': 'One or more groups not found'}), 404
-    if any(a is None for a in assessments):
-        return jsonify({'error': 'One or more assessments not found'}), 404
-
-    # Check if group with same name already exists
-    existing_group = Group.query.filter_by(name=name).first()
-
-    if existing_group:
-        target_group = existing_group
-    else:
-        # Determine parent ID based on context
-        parent_id = None
-        if group_ids:
-            parent_ids = set(g.parent_ID for g in groups)
-            parent_id = parent_ids.pop() if len(parent_ids) == 1 else None
-        elif assessment_ids:
-            parent_ids = set(a.group_ID for a in assessments)
-            if len(parent_ids) > 1:
-                return jsonify({'error': 'All assessments must belong to the same group'}), 400
-            parent_id = parent_ids.pop()
-
-        # Create new group under determined parent
-        target_group = Group(name=name, parent_ID=parent_id)
-        db.session.add(target_group)
-        db.session.flush()  # Get ID before using
-
-    # Reassign children
-    for g in groups:
-        g.parent_ID = target_group.ID
-
-    for a in assessments:
-        a.group_ID = target_group.ID
-
-    db.session.commit()
-
-    return jsonify({
-        'message': f"Items grouped under {'existing' if existing_group else 'new'} group.",
-        'group_id': target_group.ID,
-        'parent_id': target_group.parent_ID
-    })
-
-@app.route('/ungroup', methods=['POST'])
-def ungroup():
-    data = request.get_json()
-    group_id = data.get('group_id')
-
-    if not group_id:
-        return jsonify({'error': 'Group ID is required'}), 400
-
-    group = db.session.get(Group, group_id)
-    if not group:
-        return jsonify({'error': 'Group not found'}), 404
-
-    parent_id = group.parent_ID  # can be None (top-level)
-    reassigned_groups = []
-    reassigned_assessments = []
-
-    # Reassign all child groups to the parent group
-    for child in group.children:
-        child.parent_ID = parent_id
-        reassigned_groups.append(child.ID)
-
-    # Reassign all assessments of this group to the parent group
-    assessments = Assessment.query.filter_by(group_ID=group.ID).all()
-    for ass in assessments:
-        ass.group_ID = parent_id
-        reassigned_assessments.append(ass.ID)
-
-    db.session.commit()  # Commit the reassignment changes before deleting
-
-    # Delete the group itself
-    db.session.delete(group)
-    db.session.commit()
-
-    return jsonify({
-        'message': f"Group {group.name} successfully ungrouped.",
-        'moved_to_parent': parent_id,
-        'reassigned_groups': reassigned_groups,
-        'reassigned_assessments': reassigned_assessments
-    })
-
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1]
-        
-        if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
-        
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_admin = Admin.query.filter_by(ID=data['admin_id']).first()
-        except:
-            return jsonify({'message': 'Token is invalid!'}), 401
-        
-        return f(current_admin, *args, **kwargs)
-    
-    return decorated
-
-@app.route('/admin/signup', methods=['POST'])
-def admin_signup():
-    data = request.get_json()
-    
-    if not data or not data.get('email') or not data.get('password'):
-        return jsonify({'message': 'Missing required fields'}), 400
-    
-    if Admin.query.filter_by(email=data['email']).first():
-        return jsonify({'message': 'Email already exists'}), 400
-    
-    # Store password directly without hashing
-    new_admin = Admin(email=data['email'], password_hash=data['password'])
-    
-    try:
-        db.session.add(new_admin)
-        db.session.commit()
-        return jsonify({'message': 'Admin created successfully'}), 201
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error creating admin: {e}")
-        return jsonify({'message': 'Error creating admin', 'error': str(e)}), 500
-
-@app.route('/admin/login', methods=['POST'])
-def admin_login():
-    data = request.get_json()
-    
-    if not data or not data.get('email') or not data.get('password'):
-        return jsonify({'message': 'Missing required fields'}), 400
-    
-    admin = Admin.query.filter_by(email=data['email']).first()
-    
-    if not admin:
-        print(f"Login failed: Email {data['email']} not found")
-        return jsonify({'message': 'Invalid email or password'}), 401
-    
-    # Check if the password matches directly without hashing
-    if admin.password_hash != data['password']:
-        print(f"Login failed: Invalid password for {data['email']}")
-        return jsonify({'message': 'Invalid email or password'}), 401
-    
-    token = jwt.encode({
-        'admin_id': admin.ID,
-        'exp': datetime.utcnow() + timedelta(days=1)
-    }, app.config['SECRET_KEY'])
-    
-    return jsonify({
-        'message': 'Login successful',
-        'token': token,
-        'admin_id': admin.ID,
-        'email': admin.email
-    }), 200
-
-@app.route('/admin/profile', methods=['GET'])
-@token_required
-def get_admin_profile(current_admin):
-    return jsonify({
-        'admin_id': current_admin.ID,
-        'email': current_admin.email
-    }), 200
 
 @app.route('/admin/truncate')
 def truncate_admin_table():
@@ -1033,6 +1145,9 @@ def truncate_admin_table():
         db.session.rollback()
         print(f"Error truncating admin table: {e}")
         return jsonify({'message': 'Error truncating admin table', 'error': str(e)}), 500
+
+
+
 
 if __name__ == "__main__":
     threading.Thread(target=geocoding_worker, daemon=True).start()
